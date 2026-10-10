@@ -21,10 +21,11 @@ def map_lang(code: str | None, default: str = "en") -> str:
     return c if c in WHISTLE_LANGS else default
 
 class WhistleHandler(AsyncEventHandler):
-    def __init__(self, *args, model, default_lang="en", **kwargs):
+    def __init__(self, *args, model, default_lang="en", transcribe_lock=None, **kwargs):
         super().__init__(*args, **kwargs)
         self._model = model
         self._default_lang = default_lang
+        self._lock = transcribe_lock
 
     async def handle_event(self, event) -> bool:
         try:
@@ -57,17 +58,22 @@ class WhistleHandler(AsyncEventHandler):
             width = 2
             channels = 1
             audio = bytearray()
-            while True:
-                ev = await async_read_event(self.reader)
-                if ev is None:
-                    return False
-                if AudioStart.is_type(ev.type):
-                    s = AudioStart.from_event(ev)
-                    rate, width, channels = s.rate, s.width, s.channels
-                elif AudioChunk.is_type(ev.type):
-                    audio += AudioChunk.from_event(ev).audio
-                elif AudioStop.is_type(ev.type):
-                    break
+            try:
+                while True:
+                    ev = await async_read_event(self.reader)
+                    if ev is None:
+                        return False
+                    if AudioStart.is_type(ev.type):
+                        s = AudioStart.from_event(ev)
+                        rate, width, channels = s.rate, s.width, s.channels
+                    elif AudioChunk.is_type(ev.type):
+                        chunk = AudioChunk.from_event(ev).audio or b""
+                        audio += chunk
+                    elif AudioStop.is_type(ev.type):
+                        break
+            except Exception:
+                _LOGGER.exception("error reading audio stream")
+                return False
 
             if width != 2 or channels != 1:
                 _LOGGER.warning("unexpected format width=%s channels=%s rate=%s", width, channels, rate)
@@ -84,17 +90,25 @@ class WhistleHandler(AsyncEventHandler):
                 await self.write_event(Transcript(text="").event())
                 return True
             try:
-                res = await asyncio.to_thread(
-                    self._model.transcribe, pcm,
-                    language=lang, keywords=keywords)
+                if self._lock is not None:
+                    async with self._lock:
+                        res = await asyncio.to_thread(
+                            self._model.transcribe, pcm,
+                            language=lang, keywords=keywords)
+                else:
+                    res = await asyncio.to_thread(
+                        self._model.transcribe, pcm,
+                        language=lang, keywords=keywords)
             except Exception:
                 _LOGGER.exception("transcribe failed")
                 await self.write_event(Transcript(text="").event())
                 return True
-            text = (res.get("text") or "").strip()
-            out_lang = res.get("language") or lang or ""
+            text = ((res or {}).get("text") or "").strip()
+            out_lang = (res or {}).get("language") or lang or ""
+            info = res or {}
             _LOGGER.info("-> %r lang=%s ttft=%.1fms tps=%.0f",
-                         text, out_lang, res.get("ttft_ms", 0), res.get("decode_tps", 0))
+                         text, out_lang, info.get("ttft_ms", 0),
+                         info.get("decode_tps", 0))
             await self.write_event(Transcript(text=text, language=out_lang or None).event())
             return True
 
@@ -117,8 +131,10 @@ async def main():
         try:
             import json
             with open(args.options_file) as f:
-                default_lang = json.load(f).get("language") or default_lang
-        except OSError:
+                opts = json.load(f)
+            if isinstance(opts, dict) and isinstance(opts.get("language"), str):
+                default_lang = opts["language"]
+        except (OSError, ValueError):
             pass
     _LOGGER.info("default language %s", default_lang)
 
@@ -129,8 +145,10 @@ async def main():
 
     server = AsyncTcpServer.from_uri(args.uri)
     _LOGGER.info("listening %s", args.uri)
+    transcribe_lock = asyncio.Lock()
     await server.run(lambda r, w: WhistleHandler(
-        r, w, model=model, default_lang=default_lang))
+        r, w, model=model, default_lang=default_lang,
+        transcribe_lock=transcribe_lock))
 
 if __name__ == "__main__":
     asyncio.run(main())

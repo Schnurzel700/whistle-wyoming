@@ -6,7 +6,6 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 COPY requirements.txt /tmp/requirements.txt
 
 RUN apk add --no-cache \
-    ffmpeg \
     python3 \
     py3-pip \
  && python3 -m venv /opt/venv \

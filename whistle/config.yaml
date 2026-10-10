@@ -1,11 +1,12 @@
 name: Whistle STT
-version: 1.3.2
+version: 1.4.0
 slug: whistle
 description: Cactus Whistle 16.9MB speech-to-text over Wyoming protocol
 arch:
   - amd64
 startup: services
 boot: auto
+init: false
 ports:
   10301/tcp: 10301
 discovery:
