@@ -114,7 +114,7 @@ async def main():
     _LOGGER.info("whistle ready")
 
     server = AsyncTcpServer.from_uri(args.uri)
-    _LOGGER.info("listening %s (connect HA Wyoming to <HA-HOST>:10300)", args.uri)
+    _LOGGER.info("listening %s", args.uri)
     await server.run(lambda r, w: WhistleHandler(r, w, model=model))
 
 if __name__ == "__main__":
