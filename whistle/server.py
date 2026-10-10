@@ -14,16 +14,17 @@ from wyoming.server import AsyncEventHandler, AsyncTcpServer, async_read_event
 _LOGGER = logging.getLogger("wyoming-whistle")
 WHISTLE_LANGS = ("en", "de", "fr", "es", "it", "nl", "pl")
 
-def map_lang(code: str | None) -> str | None:
+def map_lang(code: str | None, default: str = "en") -> str:
     if not code:
-        return None
+        return default
     c = code.replace("_", "-").split("-")[0].lower()
-    return c if c in WHISTLE_LANGS else None
+    return c if c in WHISTLE_LANGS else default
 
 class WhistleHandler(AsyncEventHandler):
-    def __init__(self, *args, model, **kwargs):
+    def __init__(self, *args, model, default_lang="en", **kwargs):
         super().__init__(*args, **kwargs)
         self._model = model
+        self._default_lang = default_lang
 
     async def handle_event(self, event) -> bool:
         try:
@@ -48,7 +49,7 @@ class WhistleHandler(AsyncEventHandler):
 
         if Transcribe.is_type(event.type):
             req = Transcribe.from_event(event)
-            lang = map_lang(req.language)
+            lang = map_lang(req.language, self._default_lang)
             keywords = list((req.transcript_names or []) + (req.transcript_terms or [])) or None
             _LOGGER.info("transcribe lang=%s(%s) keywords=%s", lang, req.language, keywords)
 
@@ -104,11 +105,24 @@ async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--uri", default="tcp://0.0.0.0:10301")
     ap.add_argument("--weights", default=str(Path.home() / "whistle-wyoming" / "whistle.cact"))
+    ap.add_argument("--default-language", default="en")
+    ap.add_argument("--options-file", default=None,
+                    help="HA app /data/options.json, 'language' overrides --default-language")
     ap.add_argument("--zeroconf-name", default="whistle")
     ap.add_argument("--no-zeroconf", action="store_true")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
+
+    default_lang = args.default_language
+    if args.options_file:
+        try:
+            import json
+            with open(args.options_file) as f:
+                default_lang = json.load(f).get("language") or default_lang
+        except OSError:
+            pass
+    _LOGGER.info("default language %s", default_lang)
 
     import needle
     _LOGGER.info("loading %s ...", args.weights)
@@ -127,7 +141,8 @@ async def main():
         _LOGGER.info("zeroconf announced as %s on port %d",
                      args.zeroconf_name, port)
 
-    await server.run(lambda r, w: WhistleHandler(r, w, model=model))
+    await server.run(lambda r, w: WhistleHandler(
+        r, w, model=model, default_lang=default_lang))
 
 if __name__ == "__main__":
     asyncio.run(main())
