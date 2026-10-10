@@ -108,8 +108,6 @@ async def main():
     ap.add_argument("--default-language", default="en")
     ap.add_argument("--options-file", default=None,
                     help="HA app /data/options.json, 'language' overrides --default-language")
-    ap.add_argument("--zeroconf-name", default="whistle")
-    ap.add_argument("--no-zeroconf", action="store_true")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
@@ -131,16 +129,6 @@ async def main():
 
     server = AsyncTcpServer.from_uri(args.uri)
     _LOGGER.info("listening %s", args.uri)
-
-    if not args.no_zeroconf:
-        from urllib.parse import urlparse
-        from wyoming.zeroconf import HomeAssistantZeroconf
-        port = urlparse(args.uri).port or 10301
-        zc = HomeAssistantZeroconf(port, args.zeroconf_name)
-        await zc.register_server()
-        _LOGGER.info("zeroconf announced as %s on port %d",
-                     args.zeroconf_name, port)
-
     await server.run(lambda r, w: WhistleHandler(
         r, w, model=model, default_lang=default_lang))
 
