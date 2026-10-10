@@ -102,8 +102,10 @@ class WhistleHandler(AsyncEventHandler):
 
 async def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--uri", default="tcp://0.0.0.0:10300")
+    ap.add_argument("--uri", default="tcp://0.0.0.0:10301")
     ap.add_argument("--weights", default=str(Path.home() / "whistle-wyoming" / "whistle.cact"))
+    ap.add_argument("--zeroconf-name", default="whistle")
+    ap.add_argument("--no-zeroconf", action="store_true")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
@@ -115,6 +117,16 @@ async def main():
 
     server = AsyncTcpServer.from_uri(args.uri)
     _LOGGER.info("listening %s", args.uri)
+
+    if not args.no_zeroconf:
+        from urllib.parse import urlparse
+        from wyoming.zeroconf import HomeAssistantZeroconf
+        port = urlparse(args.uri).port or 10301
+        zc = HomeAssistantZeroconf(port, args.zeroconf_name)
+        await zc.register_server()
+        _LOGGER.info("zeroconf announced as %s on port %d",
+                     args.zeroconf_name, port)
+
     await server.run(lambda r, w: WhistleHandler(r, w, model=model))
 
 if __name__ == "__main__":
