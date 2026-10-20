@@ -14,17 +14,23 @@ cleanup() {
 trap cleanup EXIT SIGINT SIGTERM
 
 LANGUAGE="$(bashio::config 'language')"
+KEYWORDS="$(bashio::config 'keywords')"
 
 if [[ ! -f "${DATA}/whistle.cact" ]]; then
     bashio::log.info "downloading whistle.cact (~17MB)..."
     needle download Cactus-Compute/whistle --out "${DATA}"
 fi
 
-bashio::log.info "starting Whistle STT (default language: ${LANGUAGE})"
+# Whistle class does no per-call telemetry, this covers everything else.
+export NEEDLE_TELEMETRY=0
+export DO_NOT_TRACK=1
+
+bashio::log.info "starting Whistle STT (default language: ${LANGUAGE}, keywords: ${KEYWORDS:-none})"
 python /app/server.py \
     --uri tcp://0.0.0.0:10301 \
     --weights "${DATA}/whistle.cact" \
-    --default-language "${LANGUAGE}" &
+    --default-language "${LANGUAGE}" \
+    --keywords "${KEYWORDS}" &
 SERVER_PID=$!
 
 bashio::net.wait_for 10301
