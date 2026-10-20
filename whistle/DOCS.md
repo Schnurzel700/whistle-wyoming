@@ -13,7 +13,8 @@ First start downloads `whistle.cact` (~17 MB) into app data, then listens on por
 
 ## Behaviour
 
-- Leading and trailing silence is trimmed before inference. Quiet clips get faster and stop producing invented words; clips under 0.3 s of speech return an empty transcript.
+- Leading and trailing silence is trimmed before inference. Quiet clips get faster and stop producing invented words; clips under 0.3 s of speech return an empty transcript. The thresholds are relative to the clip's own peak and noise floor, so quiet mics (peak around -60 dBFS) are handled as well as loud ones. Real silence at the 16-bit floor still returns an empty transcript without running the model.
+- Clips peaking below -20 dBFS are amplified so they peak near -6 dBFS before inference (capped at +50 dB). The log shows the applied gain as `gain=...dB`, `+0.0dB` when nothing was amplified.
 - Audio is converted from 16-bit PCM to the float32 samples Whistle expects; audio longer than 30 s is truncated with a warning.
 - Telemetry is disabled, including for the CLI model download; the `Whistle` class is used directly and no per-call network calls are made.
 - One transcription runs at a time; concurrent requests wait for the lock.

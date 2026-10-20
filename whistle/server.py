@@ -21,6 +21,10 @@ _LOGGER = logging.getLogger("wyoming-whistle")
 WHISTLE_LANGS = ("en", "de", "fr", "es", "it", "nl", "pl")
 FRAME_SECONDS = 0.03
 MIN_SPEECH_SECONDS = 0.3
+QUIET_DB = -20.0   # below this clip peak the input is amplified
+TARGET_DB = -6.0   # amplified clips peak near here
+MAX_GAIN_DB = 50.0 # safety cap on the amplification
+SILENT_DB = -110.0 # peaks below this are digital silence (16-bit ADC floor ~-98)
 MAX_KEYWORDS = 200
 STREAM_CHUNK_BYTES = int(16000 * 2 * 0.5)  # 0.5 s of 16 kHz int16
 MAX_STREAM_BYTES = 16000 * 2 * 30  # 30 s window, same as the batch path
@@ -33,9 +37,8 @@ def map_lang(code: str | None, default: str = "en") -> str:
     return c if c in WHISTLE_LANGS else default
 
 
-def find_speech(samples: np.ndarray, rate: int, floor_db: float = -50.0,
-                below_peak_db: float = 30.0, above_noise_db: float = 9.0,
-                pad_seconds: float = 0.25):
+def find_speech(samples: np.ndarray, rate: int, below_peak_db: float = 30.0,
+                above_noise_db: float = 9.0, pad_seconds: float = 0.25):
     """Locate speech by energy. Returns (start, end, speech_seconds, peak_db,
     noise_db); (0, 0, 0.0, peak, noise) when nothing passes the threshold, and
     None only for clips shorter than one frame.
@@ -43,6 +46,8 @@ def find_speech(samples: np.ndarray, rate: int, floor_db: float = -50.0,
     A 30 ms frame counts as speech when it is louder than the clip noise floor
     (10th percentile) plus a margin and within 30 dB of the peak.  Trailing
     silence is what makes Whistle slow and invent words, so it gets cut.
+    Thresholds are relative only: satellite mics often peak around -60 dBFS,
+    so no absolute dB cutoff is used.
     """
     size = max(1, int(rate * FRAME_SECONDS))
     count = len(samples) // size
@@ -53,7 +58,10 @@ def find_speech(samples: np.ndarray, rate: int, floor_db: float = -50.0,
     levels = 20 * np.log10(np.maximum(rms, 1e-10))
     peak = float(levels.max())
     noise = float(np.percentile(levels, 10))
-    threshold = max(floor_db, peak - below_peak_db,
+    if peak < SILENT_DB:
+        # Digital silence only; relative thresholds would let it through.
+        return 0, 0, 0.0, peak, noise
+    threshold = max(peak - below_peak_db,
                     min(peak - 6.0, noise + above_noise_db))
     speech = np.flatnonzero(levels > threshold)
     if len(speech) == 0:
@@ -302,6 +310,12 @@ class WhistleHandler(AsyncEventHandler):
             if self._trim:
                 pcm = pcm[bounds[0]:bounds[1]]
             kept_s = len(pcm) / 16000
+            # Satellite mics can run ~40 dB too quiet; bring the clip up to a
+            # normal level so the mel features see a usable scale.
+            gain = 0.0
+            if bounds[3] < QUIET_DB:
+                gain = min(TARGET_DB - bounds[3], MAX_GAIN_DB)
+                pcm = (pcm * 10.0 ** (gain / 20)).astype(np.float32)
             started = time.perf_counter()
             try:
                 if self._lock is not None:
@@ -321,8 +335,8 @@ class WhistleHandler(AsyncEventHandler):
             text = ((res or {}).get("text") or "").strip()
             out_lang = (res or {}).get("language") or lang or ""
             info = res or {}
-            _LOGGER.info("-> %r lang=%s audio=%.2fs kept=%.2fs ms=%.0f ttft=%.1fms tps=%.0f",
-                         text, out_lang, audio_s, kept_s, elapsed_ms,
+            _LOGGER.info("-> %r lang=%s audio=%.2fs kept=%.2fs gain=%+.1fdB ms=%.0f ttft=%.1fms tps=%.0f",
+                         text, out_lang, audio_s, kept_s, gain, elapsed_ms,
                          info.get("ttft_ms", 0), info.get("decode_tps", 0))
             await self.write_event(Transcript(text=text, language=out_lang or None).event())
             return True
