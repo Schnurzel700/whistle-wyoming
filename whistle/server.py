@@ -34,6 +34,9 @@ def map_lang(code: str | None, default: str = "en") -> str:
     if not code:
         return default
     c = code.replace("_", "-").split("-")[0].lower()
+    if c == "auto":
+        # Engine auto-detects the language per clip.
+        return "auto"
     return c if c in WHISTLE_LANGS else default
 
 
@@ -198,7 +201,7 @@ class WhistleHandler(AsyncEventHandler):
                                  attribution=Attribution(name="Cactus", url=""),
                                  version="1.0.0",
                                  installed=True,
-                                 languages=list(WHISTLE_LANGS))],
+                                 languages=["auto", *WHISTLE_LANGS])],
             )]).event())
             return True
 
@@ -210,6 +213,7 @@ class WhistleHandler(AsyncEventHandler):
             keywords = list(dict.fromkeys(
                 t.strip() for t in terms if t and t.strip()))[:MAX_KEYWORDS] or None
             _LOGGER.info("transcribe lang=%s(%s) keywords=%s", lang, req.language, keywords)
+            engine_lang = None if lang == "auto" else lang
 
             rate = 16000
             width = 2
@@ -234,7 +238,7 @@ class WhistleHandler(AsyncEventHandler):
                             if self._lock is not None:
                                 await self._lock.acquire()
                                 locked = True
-                            session = StreamSession(self._model, lang, keywords)
+                            session = StreamSession(self._model, engine_lang, keywords)
                             session.start()
                     elif AudioChunk.is_type(ev.type):
                         chunk = AudioChunk.from_event(ev).audio or b""
@@ -322,11 +326,11 @@ class WhistleHandler(AsyncEventHandler):
                     async with self._lock:
                         res = await asyncio.to_thread(
                             self._model.transcribe, pcm,
-                            language=lang, keywords=keywords)
+                            language=engine_lang, keywords=keywords)
                 else:
                     res = await asyncio.to_thread(
                         self._model.transcribe, pcm,
-                        language=lang, keywords=keywords)
+                        language=engine_lang, keywords=keywords)
             except Exception:
                 _LOGGER.exception("transcribe failed")
                 await self.write_event(Transcript(text="").event())
