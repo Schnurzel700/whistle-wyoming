@@ -13,7 +13,8 @@ First start downloads `whistle.cact` (~17 MB) into app data, then listens on por
 ## Behaviour
 
 - Leading and trailing silence is trimmed before inference. Quiet clips get faster and stop producing invented words; clips under 0.3 s of speech return an empty transcript.
-- Audio is converted from 16-bit PCM to the float32 samples Whistle expects.
-- Telemetry is disabled; the `Whistle` class is used directly and no per-call network calls are made.
+- Audio is converted from 16-bit PCM to the float32 samples Whistle expects; audio longer than 30 s is truncated with a warning.
+- Telemetry is disabled, including for the CLI model download; the `Whistle` class is used directly and no per-call network calls are made.
 - One transcription runs at a time; concurrent requests wait for the lock.
 - The model is downloaded on first start; nothing else touches the network.
+- Per-event logging skips audio chunks (they are DEBUG level), so the log stays quiet under load.

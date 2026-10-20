@@ -3,6 +3,11 @@ FROM $BUILD_FROM
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
+# No telemetry, no hub chatter at runtime.
+ENV NEEDLE_TELEMETRY=0 \
+    DO_NOT_TRACK=1 \
+    HF_HUB_DISABLE_TELEMETRY=1
+
 COPY requirements.txt /tmp/requirements.txt
 
 RUN apk add --no-cache \

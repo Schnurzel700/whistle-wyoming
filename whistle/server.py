@@ -13,6 +13,7 @@ import numpy as np
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.asr import Transcribe, Transcript
 from wyoming.info import AsrModel, AsrProgram, Attribution, Describe, Info
+from wyoming.ping import Ping, Pong
 from wyoming.server import AsyncEventHandler, AsyncTcpServer, async_read_event
 
 _LOGGER = logging.getLogger("wyoming-whistle")
@@ -60,7 +61,8 @@ def find_speech(samples: np.ndarray, rate: int, floor_db: float = -50.0,
 
 
 def pcm16_to_float(pcm) -> np.ndarray:
-    return np.frombuffer(bytes(pcm), dtype=np.int16).astype(np.float32) / 32768.0
+    data = bytes(pcm[: len(pcm) & ~1])  # drop a trailing odd byte if any
+    return np.frombuffer(data, dtype="<i2").astype(np.float32) / 32768.0
 
 
 class StreamSession:
@@ -77,6 +79,7 @@ class StreamSession:
         self._steps = 0
         self._pass_ms = 0.0
         self._received = 0.0
+        self._language = lang or ""
         self._started = time.perf_counter()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -110,6 +113,7 @@ class StreamSession:
                 self._steps += 1
                 self._pass_ms += step.get("pass_ms") or 0
                 self._received = step.get("received") or self._received
+                self._language = step.get("language") or self._language
         except BaseException as err:
             self._error = err
             _LOGGER.exception("stream worker failed")
@@ -127,6 +131,7 @@ class StreamSession:
             "pass_ms": round(self._pass_ms),
             "total_ms": round((time.perf_counter() - self._started) * 1000),
             "received": round(self._received, 2),
+            "language": self._language,
         }
         return " ".join(self._parts).strip(), stats
 
@@ -148,7 +153,14 @@ class WhistleHandler(AsyncEventHandler):
             peer = self.writer.get_extra_info("peername")
         except Exception:
             peer = None
-        _LOGGER.info("event %s from %s", event.type, peer)
+        # audio chunks are 50 per second per client, keep them out of INFO
+        if event.type == "audio-chunk":
+            _LOGGER.debug("event %s from %s", event.type, peer)
+        else:
+            _LOGGER.info("event %s from %s", event.type, peer)
+        if Ping.is_type(event.type):
+            await self.write_event(Pong().event())
+            return True
         if Describe.is_type(event.type):
             await self.write_event(Info(asr=[AsrProgram(
                 name="whistle",
@@ -214,7 +226,11 @@ class WhistleHandler(AsyncEventHandler):
 
             if width != 2 or channels != 1:
                 _LOGGER.warning("unexpected format width=%s channels=%s rate=%s", width, channels, rate)
-            pcm = pcm16_to_float(audio)[:480000]  # 30s max
+            pcm = pcm16_to_float(audio)
+            if len(pcm) > 480000:  # 30s max
+                _LOGGER.warning("audio %.1fs longer than the 30s window, truncating",
+                                len(pcm) / 16000)
+                pcm = pcm[:480000]
             if rate != 16000 and len(pcm):
                 # naive resample to 16k
                 dur = len(pcm) / rate
@@ -238,11 +254,12 @@ class WhistleHandler(AsyncEventHandler):
                 elapsed_ms = (time.perf_counter() - started) * 1000
                 bounds = find_speech(pcm, 16000) if len(pcm) else None
                 speech_s = bounds[2] if bounds else 0.0
+                out_lang = stats.get("language") or lang
                 _LOGGER.info("-> %r (stream) lang=%s audio=%.2fs speech=%.2fs "
                              "flush=%.0fms total=%.0fms passes=%s pass_ms=%s",
-                             text, lang, audio_s, speech_s, flush_ms, elapsed_ms,
+                             text, out_lang, audio_s, speech_s, flush_ms, elapsed_ms,
                              stats.get("passes", 0), stats.get("pass_ms", 0))
-                await self.write_event(Transcript(text=text, language=lang).event())
+                await self.write_event(Transcript(text=text, language=out_lang).event())
                 return True
 
             bounds = find_speech(pcm, 16000) if len(pcm) else None
@@ -324,6 +341,12 @@ async def main():
                 default_lang = opts["language"]
         except (OSError, ValueError):
             pass
+    if default_lang not in WHISTLE_LANGS:
+        remapped = map_lang(default_lang)
+        if remapped != default_lang:
+            _LOGGER.warning("default language %r unsupported, using %r",
+                            default_lang, remapped)
+        default_lang = remapped
     _LOGGER.info("default language %s", default_lang)
     keywords = [k.strip() for k in args.keywords.split(",") if k.strip()]
     if keywords:
