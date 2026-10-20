@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import queue
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -347,6 +348,8 @@ async def main():
                     help="comma separated words to bias recognition toward")
     ap.add_argument("--options-file", default=None,
                     help="HA app /data/options.json, 'language' overrides --default-language")
+    ap.add_argument("--lib-cache", default=None,
+                    help="persistent dir to cache the engine library across restarts")
     ap.add_argument("--no-trim", action="store_true",
                     help="keep leading and trailing silence")
     ap.add_argument("--streaming", action="store_true",
@@ -381,6 +384,27 @@ async def main():
         _LOGGER.info("keywords %s", keywords)
 
     import needle
+    from needle.agent import fetch as needle_fetch
+
+    # The container FS does not survive an add-on restart.  Keep the engine
+    # library on the mapped /data so a rebuild does not re-download it.
+    if args.lib_cache and os.environ.get("NEEDLE3_LIB_PATH") is None:
+        try:
+            version = (f"{needle_fetch.engine_version(3)}"
+                       f"-{needle_fetch._platform_tag()}")
+            target = Path(args.lib_cache) / f"libneedle-{version}.so"
+            if not target.exists():
+                lib_path = needle._library_path(3)  # downloads on first boot
+                if lib_path and Path(lib_path) != target:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy(lib_path, target)
+            if target.exists():
+                os.environ["NEEDLE3_LIB_PATH"] = str(target)
+                _LOGGER.info("engine library %s", target)
+        except Exception:
+            _LOGGER.exception("engine library cache setup failed")
+            _LOGGER.info("using default engine resolution")
+
     _LOGGER.info("loading %s ...", args.weights)
     model = await asyncio.to_thread(needle.Whistle, weights=args.weights)
     _LOGGER.info("whistle ready")

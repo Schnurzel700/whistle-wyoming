@@ -16,5 +16,5 @@ First start downloads `whistle.cact` (~17 MB) into app data, then listens on por
 - Audio is converted from 16-bit PCM to the float32 samples Whistle expects; audio longer than 30 s is truncated with a warning.
 - Telemetry is disabled, including for the CLI model download; the `Whistle` class is used directly and no per-call network calls are made.
 - One transcription runs at a time; concurrent requests wait for the lock.
-- The model is downloaded on first start; nothing else touches the network.
+- The model is downloaded on first start; nothing else touches the network. The engine library is cached in app data under a name that includes the engine version, so an update fetching a newer engine invalidates it automatically.
 - Per-event logging skips audio chunks (they are DEBUG level), so the log stays quiet under load.

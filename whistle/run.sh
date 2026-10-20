@@ -37,6 +37,7 @@ ARGS=(
     --weights "${DATA}/whistle.cact"
     --default-language "${LANGUAGE}"
     --keywords "${KEYWORDS}"
+    --lib-cache "${DATA}"
 )
 if [[ "${STREAMING}" == "true" ]]; then
     ARGS+=(--streaming)
@@ -49,8 +50,7 @@ for _ in $(seq 1 600); do
         bashio::log.error "server exited during startup"
         exit 1
     fi
-    if exec 3<>"/dev/tcp/127.0.0.1/10301" 2>/dev/null; then
-        exec 3>&-
+    if (exec 3<>"/dev/tcp/127.0.0.1/10301") 2>/dev/null; then
         break
     fi
     sleep 0.5
