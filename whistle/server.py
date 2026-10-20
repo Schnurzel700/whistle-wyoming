@@ -3,6 +3,8 @@ import argparse
 import asyncio
 import logging
 import os
+import queue
+import threading
 import time
 from pathlib import Path
 
@@ -18,6 +20,7 @@ WHISTLE_LANGS = ("en", "de", "fr", "es", "it", "nl", "pl")
 FRAME_SECONDS = 0.03
 MIN_SPEECH_SECONDS = 0.3
 MAX_KEYWORDS = 200
+STREAM_CHUNK_BYTES = int(16000 * 2 * 0.5)  # 0.5 s of 16 kHz int16
 
 
 def map_lang(code: str | None, default: str = "en") -> str:
@@ -56,15 +59,89 @@ def find_speech(samples: np.ndarray, rate: int, floor_db: float = -50.0,
     return start, end, len(speech) * FRAME_SECONDS
 
 
+def pcm16_to_float(pcm) -> np.ndarray:
+    return np.frombuffer(bytes(pcm), dtype=np.int16).astype(np.float32) / 32768.0
+
+
+class StreamSession:
+    """Runs Whistle.stream in a worker thread while audio is still arriving."""
+
+    def __init__(self, model, lang, keywords):
+        self._model = model
+        self._lang = lang
+        self._keywords = keywords
+        self._queue = queue.Queue()
+        self._done = threading.Event()
+        self._parts = []
+        self._error = None
+        self._steps = 0
+        self._pass_ms = 0.0
+        self._received = 0.0
+        self._started = time.perf_counter()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def feed(self, data):
+        if data:
+            self._queue.put(bytes(data))
+
+    def _chunks(self):
+        buf = bytearray()
+        while True:
+            item = self._queue.get()
+            if item is None:
+                if buf:
+                    yield pcm16_to_float(buf)
+                return
+            buf += item
+            if len(buf) >= STREAM_CHUNK_BYTES:
+                yield pcm16_to_float(buf)
+                buf.clear()
+
+    def _run(self):
+        try:
+            for step in self._model.stream(
+                    self._chunks(), language=self._lang, keywords=self._keywords):
+                text = (step.get("text") or "").strip()
+                if text:
+                    self._parts.append(text)
+                self._steps += 1
+                self._pass_ms += step.get("pass_ms") or 0
+                self._received = step.get("received") or self._received
+        except BaseException as err:
+            self._error = err
+            _LOGGER.exception("stream worker failed")
+        finally:
+            self._done.set()
+
+    async def finish(self, timeout=120.0):
+        self._queue.put(None)
+        if not await asyncio.to_thread(self._done.wait, timeout):
+            raise TimeoutError("stream transcription timed out")
+        if self._error is not None:
+            raise self._error
+        stats = {
+            "passes": self._steps,
+            "pass_ms": round(self._pass_ms),
+            "total_ms": round((time.perf_counter() - self._started) * 1000),
+            "received": round(self._received, 2),
+        }
+        return " ".join(self._parts).strip(), stats
+
+
+
 class WhistleHandler(AsyncEventHandler):
     def __init__(self, *args, model, default_lang="en", keywords=None,
-                 transcribe_lock=None, trim=True, **kwargs):
+                 transcribe_lock=None, trim=True, streaming=False, **kwargs):
         super().__init__(*args, **kwargs)
         self._model = model
         self._default_lang = default_lang
         self._keywords = keywords or []
         self._lock = transcribe_lock
         self._trim = trim
+        self._streaming = streaming
 
     async def handle_event(self, event) -> bool:
         try:
@@ -100,26 +177,44 @@ class WhistleHandler(AsyncEventHandler):
             width = 2
             channels = 1
             audio = bytearray()
+            session = None
+            locked = False
+            started = time.perf_counter()
+            stop_at = None
             try:
                 while True:
                     ev = await async_read_event(self.reader)
                     if ev is None:
+                        if session is not None:
+                            await self._close(session, locked)
                         return False
                     if AudioStart.is_type(ev.type):
                         s = AudioStart.from_event(ev)
                         rate, width, channels = s.rate, s.width, s.channels
+                        if (self._streaming and session is None
+                                and rate == 16000 and width == 2 and channels == 1):
+                            if self._lock is not None:
+                                await self._lock.acquire()
+                                locked = True
+                            session = StreamSession(self._model, lang, keywords)
+                            session.start()
                     elif AudioChunk.is_type(ev.type):
                         chunk = AudioChunk.from_event(ev).audio or b""
                         audio += chunk
+                        if session is not None:
+                            session.feed(chunk)
                     elif AudioStop.is_type(ev.type):
+                        stop_at = time.perf_counter()
                         break
             except Exception:
+                if session is not None:
+                    await self._close(session, locked)
                 _LOGGER.exception("error reading audio stream")
                 return False
 
             if width != 2 or channels != 1:
                 _LOGGER.warning("unexpected format width=%s channels=%s rate=%s", width, channels, rate)
-            pcm = np.frombuffer(bytes(audio), dtype=np.int16).astype(np.float32) / 32768.0
+            pcm = pcm16_to_float(audio)[:480000]  # 30s max
             if rate != 16000 and len(pcm):
                 # naive resample to 16k
                 dur = len(pcm) / rate
@@ -127,8 +222,28 @@ class WhistleHandler(AsyncEventHandler):
                 pcm = np.interp(
                     np.linspace(0, len(pcm), target, endpoint=False),
                     np.arange(len(pcm)), pcm).astype(np.float32)
-            pcm = pcm[:480000]  # 30s max
             audio_s = len(pcm) / 16000
+
+            if session is not None:
+                try:
+                    text, stats = await session.finish()
+                except Exception:
+                    _LOGGER.exception("stream transcribe failed")
+                    text, stats = "", {}
+                finally:
+                    if locked:
+                        self._lock.release()
+                flush_ms = ((time.perf_counter() - stop_at) * 1000
+                            if stop_at else 0.0)
+                elapsed_ms = (time.perf_counter() - started) * 1000
+                bounds = find_speech(pcm, 16000) if len(pcm) else None
+                speech_s = bounds[2] if bounds else 0.0
+                _LOGGER.info("-> %r (stream) lang=%s audio=%.2fs speech=%.2fs "
+                             "flush=%.0fms total=%.0fms passes=%s pass_ms=%s",
+                             text, lang, audio_s, speech_s, flush_ms, elapsed_ms,
+                             stats.get("passes", 0), stats.get("pass_ms", 0))
+                await self.write_event(Transcript(text=text, language=lang).event())
+                return True
 
             bounds = find_speech(pcm, 16000) if len(pcm) else None
             if bounds is None or bounds[2] < MIN_SPEECH_SECONDS:
@@ -168,6 +283,15 @@ class WhistleHandler(AsyncEventHandler):
         _LOGGER.debug("ignored %s", event.type)
         return True
 
+    async def _close(self, session, locked):
+        try:
+            await session.finish()
+        except Exception:
+            _LOGGER.exception("stream cleanup failed")
+        finally:
+            if locked:
+                self._lock.release()
+
 
 async def main():
     ap = argparse.ArgumentParser()
@@ -180,6 +304,8 @@ async def main():
                     help="HA app /data/options.json, 'language' overrides --default-language")
     ap.add_argument("--no-trim", action="store_true",
                     help="keep leading and trailing silence")
+    ap.add_argument("--streaming", action="store_true",
+                    help="transcribe while audio is still arriving")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
@@ -213,7 +339,8 @@ async def main():
     transcribe_lock = asyncio.Lock()
     await server.run(lambda r, w: WhistleHandler(
         r, w, model=model, default_lang=default_lang, keywords=keywords,
-        transcribe_lock=transcribe_lock, trim=not args.no_trim))
+        transcribe_lock=transcribe_lock, trim=not args.no_trim,
+        streaming=args.streaming))
 
 if __name__ == "__main__":
     asyncio.run(main())

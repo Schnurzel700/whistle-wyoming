@@ -16,6 +16,7 @@ Then pick `whistle` as the speech-to-text engine in your Assist pipeline.
 | --- | --- | --- |
 | `language` | `en` | Fallback language when the client sends none or an unsupported code (`en`, `de`, `fr`, `es`, `it`, `nl`, `pl`). |
 | `keywords` | empty | Comma separated words to bias recognition toward, e.g. `Wetter,Licht,Temperatur`. |
+| `streaming` | `false` | Run `Whistle.stream` while audio arrives. Experimental: measured slower than the trimmed batch path on CPU. |
 
 ## What the server does
 
@@ -30,6 +31,18 @@ Then pick `whistle` as the speech-to-text engine in your Assist pipeline.
 - Returns an empty transcript for silence or clips with less than 0.3 s of speech instead of letting the model invent words.
 - Serializes inference with a lock and runs it in a worker thread, so multiple connections cannot corrupt the native engine.
 - Uses the `Whistle` class directly and sets `NEEDLE_TELEMETRY=0`; no per-call network calls.
+
+## Benchmarks
+
+Desktop 8-core, 16 kHz mono, 100 ms chunks, time from `AudioStop` to transcript:
+
+| Clip | Batch, trimmed | Streaming |
+| --- | --- | --- |
+| 2 s speech + 6 s silence | 0.41 s | 6.05 s |
+| 3 s speech + 8 s silence | 0.57 s | 18.17 s |
+| 7.4 s continuous speech | 1.92 s | 7.52 s |
+
+`Whistle.stream` reprocesses the buffered audio on every pass, so it cannot keep up here. Trimming is the real win: 5-6x against untrimmed audio.
 
 ## Repo layout
 

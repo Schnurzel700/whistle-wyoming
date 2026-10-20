@@ -15,6 +15,7 @@ trap cleanup EXIT SIGINT SIGTERM
 
 LANGUAGE="$(bashio::config 'language')"
 KEYWORDS="$(bashio::config 'keywords')"
+STREAMING="$(bashio::config 'streaming')"
 
 if [[ ! -f "${DATA}/whistle.cact" ]]; then
     bashio::log.info "downloading whistle.cact (~17MB)..."
@@ -25,12 +26,17 @@ fi
 export NEEDLE_TELEMETRY=0
 export DO_NOT_TRACK=1
 
-bashio::log.info "starting Whistle STT (default language: ${LANGUAGE}, keywords: ${KEYWORDS:-none})"
-python /app/server.py \
-    --uri tcp://0.0.0.0:10301 \
-    --weights "${DATA}/whistle.cact" \
-    --default-language "${LANGUAGE}" \
-    --keywords "${KEYWORDS}" &
+bashio::log.info "starting Whistle STT (default language: ${LANGUAGE}, keywords: ${KEYWORDS:-none}, streaming: ${STREAMING})"
+ARGS=(
+    --uri tcp://0.0.0.0:10301
+    --weights "${DATA}/whistle.cact"
+    --default-language "${LANGUAGE}"
+    --keywords "${KEYWORDS}"
+)
+if [[ "${STREAMING}" == "true" ]]; then
+    ARGS+=(--streaming)
+fi
+python /app/server.py "${ARGS[@]}" &
 SERVER_PID=$!
 
 bashio::net.wait_for 10301
