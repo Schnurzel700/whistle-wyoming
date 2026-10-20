@@ -1,5 +1,5 @@
 name: Whistle STT
-version: 1.6.3
+version: 1.6.4
 slug: whistle
 description: Cactus Whistle 16.9MB speech-to-text over Wyoming protocol
 arch:
@@ -17,7 +17,9 @@ options:
   language: en
   keywords: ""
   streaming: false
+  trim: true
 schema:
   language: str
   keywords: str
   streaming: bool
+  trim: bool

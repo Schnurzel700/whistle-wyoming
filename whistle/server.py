@@ -36,7 +36,9 @@ def map_lang(code: str | None, default: str = "en") -> str:
 def find_speech(samples: np.ndarray, rate: int, floor_db: float = -50.0,
                 below_peak_db: float = 30.0, above_noise_db: float = 9.0,
                 pad_seconds: float = 0.25):
-    """Locate speech by energy. Returns (start, end, speech_seconds) or None.
+    """Locate speech by energy. Returns (start, end, speech_seconds, peak_db,
+    noise_db); (0, 0, 0.0, peak, noise) when nothing passes the threshold, and
+    None only for clips shorter than one frame.
 
     A 30 ms frame counts as speech when it is louder than the clip noise floor
     (10th percentile) plus a margin and within 30 dB of the peak.  Trailing
@@ -55,11 +57,12 @@ def find_speech(samples: np.ndarray, rate: int, floor_db: float = -50.0,
                     min(peak - 6.0, noise + above_noise_db))
     speech = np.flatnonzero(levels > threshold)
     if len(speech) == 0:
-        return None
+        # No speech frame: keep the level measurements for the log.
+        return 0, 0, 0.0, peak, noise
     pad = int(rate * pad_seconds)
     start = max(0, int(speech[0]) * size - pad)
     end = min(len(samples), (int(speech[-1]) + 1) * size + pad)
-    return start, end, len(speech) * FRAME_SECONDS
+    return start, end, len(speech) * FRAME_SECONDS, peak, noise
 
 
 def pcm16_to_float(pcm) -> np.ndarray:
@@ -287,13 +290,18 @@ class WhistleHandler(AsyncEventHandler):
             bounds = find_speech(pcm, 16000) if len(pcm) else None
             if bounds is None or bounds[2] < MIN_SPEECH_SECONDS:
                 # Silence or a mic tap: answer empty instead of hallucinating.
-                _LOGGER.info("no speech in %.2fs, empty transcript", audio_s)
+                if bounds is not None:
+                    _LOGGER.info(
+                        "no speech in %.2fs peak=%.1fdB noise=%.1fdB, "
+                        "empty transcript", audio_s, bounds[3], bounds[4])
+                else:
+                    _LOGGER.info("no speech in %.2fs, empty transcript",
+                                 audio_s)
                 await self.write_event(Transcript(text="", language=lang).event())
                 return True
             if self._trim:
                 pcm = pcm[bounds[0]:bounds[1]]
             kept_s = len(pcm) / 16000
-
             started = time.perf_counter()
             try:
                 if self._lock is not None:
