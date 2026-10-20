@@ -29,7 +29,7 @@ async def transcribe(host, port, pcm, language, chunk_ms):
         stop = time.perf_counter()
         await client.write_event(AudioStop().event())
         result = (await asyncio.wait_for(client.read_event(), 120)).data
-    return (time.perf_counter() - stop) * 1000, result["text"]
+    return (time.perf_counter() - stop) * 1000, result.get("text", "")
 
 
 async def main():

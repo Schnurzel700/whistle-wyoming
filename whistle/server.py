@@ -22,6 +22,7 @@ FRAME_SECONDS = 0.03
 MIN_SPEECH_SECONDS = 0.3
 MAX_KEYWORDS = 200
 STREAM_CHUNK_BYTES = int(16000 * 2 * 0.5)  # 0.5 s of 16 kHz int16
+MAX_STREAM_BYTES = 16000 * 2 * 30  # 30 s window, same as the batch path
 
 
 def map_lang(code: str | None, default: str = "en") -> str:
@@ -79,6 +80,8 @@ class StreamSession:
         self._steps = 0
         self._pass_ms = 0.0
         self._received = 0.0
+        self._fed = 0
+        self._capped = False
         self._language = lang or ""
         self._started = time.perf_counter()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -87,8 +90,15 @@ class StreamSession:
         self._thread.start()
 
     def feed(self, data):
-        if data:
-            self._queue.put(bytes(data))
+        if not data:
+            return
+        if self._fed >= MAX_STREAM_BYTES:
+            if not self._capped:
+                self._capped = True
+                _LOGGER.warning("stream audio exceeds 30s, dropping the rest")
+            return
+        self._fed += len(data)
+        self._queue.put(bytes(data))
 
     def _chunks(self):
         buf = bytearray()
@@ -134,6 +144,10 @@ class StreamSession:
             "language": self._language,
         }
         return " ".join(self._parts).strip(), stats
+
+    async def wait_done(self):
+        """Wait until the worker thread exits, however long it takes."""
+        await asyncio.to_thread(self._done.wait)
 
 
 
@@ -243,6 +257,13 @@ class WhistleHandler(AsyncEventHandler):
             if session is not None:
                 try:
                     text, stats = await session.finish()
+                except TimeoutError:
+                    # Still letting the worker run: holding the lock until it
+                    # exits is the only way to protect the native engine.
+                    _LOGGER.error("stream transcription timed out, reaping")
+                    asyncio.get_running_loop().create_task(
+                        self._reap(session, locked))
+                    text, stats, locked = "", {}, False
                 except Exception:
                     _LOGGER.exception("stream transcribe failed")
                     text, stats = "", {}
@@ -305,6 +326,13 @@ class WhistleHandler(AsyncEventHandler):
             await session.finish()
         except Exception:
             _LOGGER.exception("stream cleanup failed")
+        finally:
+            if locked:
+                self._lock.release()
+
+    async def _reap(self, session, locked):
+        try:
+            await session.wait_done()
         finally:
             if locked:
                 self._lock.release()
