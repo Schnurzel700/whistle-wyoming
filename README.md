@@ -60,4 +60,10 @@ python -m venv /tmp/whistle && /tmp/whistle/bin/pip install -r whistle/requireme
 /tmp/whistle/bin/python whistle/server.py --weights /path/to/whistle.cact --keywords "Wetter,Licht"
 ```
 
-Send a `Describe` event to port 10301 and expect an `Info` event with `whistle` and the seven languages.
+Send a `Describe` event to port 10301 and expect an `Info` event with `whistle` and the seven languages. Or run the smoke test against a live server:
+
+```sh
+python scripts/wyoming_smoke.py --wav clip.wav --port 10301
+```
+
+It sends 2 s of silence (expects an empty transcript), then the WAV in real-time chunks and prints the transcript plus the time from `AudioStop` to the result.
